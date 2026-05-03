@@ -181,9 +181,14 @@ HIDE_SIDEBAR_CSS = """
 (function() {
     var style = document.createElement('style');
     style.textContent = `
-        /* Target only the narrow icon sidebar by its exact aria-label */
+        /* Hide the narrow left icon sidebar */
         [aria-label="Inbox switcher"] {
             display: none !important;
+        }
+
+        /* Remove the 16px left margin from the thread list */
+        [aria-label="Thread list"] {
+            margin-left: 0 !important;
         }
     `;
     document.head.appendChild(style);

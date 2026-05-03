@@ -9,11 +9,21 @@ Messenger Chat Head for Windows
 import threading
 import time
 import os
+import sys
 import ctypes
 import json
 import tkinter as tk
 import atexit
 import webview
+
+
+def _get_asset_path(filename):
+    """Works both for .py and PyInstaller .exe"""
+    if getattr(sys, 'frozen', False):
+        base = sys._MEIPASS
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, filename)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 BUBBLE_SIZE   = 58
@@ -62,7 +72,7 @@ def _set_toolwindow(hwnd):
 def _set_taskbar_icon(hwnd):
     """Set taskbar icon from logo.png using Windows API"""
     try:
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+        icon_path = _get_asset_path("logo.png")
         if not os.path.exists(icon_path):
             return
 
@@ -96,6 +106,35 @@ def _set_taskbar_icon(hwnd):
             ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG,   hicon)
     except Exception:
         pass
+
+def _find_webview_hwnd():
+    """Find webview HWND by matching our process ID and window title."""
+    import ctypes.wintypes
+    pid = os.getpid()
+    found = [None]
+
+    EnumWindowsProc = ctypes.WINFUNCTYPE(
+        ctypes.c_bool,
+        ctypes.wintypes.HWND,
+        ctypes.wintypes.LPARAM
+    )
+
+    def callback(hwnd, _):
+        if not ctypes.windll.user32.IsWindowVisible(hwnd):
+            return True
+        win_pid = ctypes.wintypes.DWORD()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(win_pid))
+        if win_pid.value != pid:
+            return True
+        buf = ctypes.create_unicode_buffer(256)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, 256)
+        if "MCBW" in buf.value:
+            found[0] = hwnd
+            return False
+        return True
+
+    ctypes.windll.user32.EnumWindows(EnumWindowsProc(callback), 0)
+    return found[0]
 
 # ── Config helpers ─────────────────────────────────────────────────────────────
 def load_config():
@@ -294,8 +333,20 @@ class BubbleThread(threading.Thread):
         self.root = root = tk.Tk()
         root.overrideredirect(True)
         root.attributes("-topmost", True)
+        root.attributes("-toolwindow", True)
         root.config(bg="#010101")  
         root.attributes("-transparentcolor", "#010101")
+
+        try:
+            from PIL import Image, ImageTk
+            logo_path = _get_asset_path("logo.png")
+            if os.path.exists(logo_path):
+                icon_img = Image.open(logo_path).convert("RGBA")
+                icon_photo = ImageTk.PhotoImage(icon_img)
+                root.iconphoto(True, icon_photo)
+                root._icon_photo = icon_photo  # prevent garbage collection
+        except Exception:
+            pass
 
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
@@ -304,7 +355,7 @@ class BubbleThread(threading.Thread):
             _state["sh"] = sh
 
         x = sw - BUBBLE_SIZE - SNAP_MARGIN
-        y = (sh - BUBBLE_SIZE) // 2
+        y = sh // 6
         # Restore saved bubble Y position if available
         with _lock:
             saved_y = _state.get("saved_bubble_y", -1)
@@ -616,22 +667,9 @@ def run_webview():
         def attach_icon():
             """Attach taskbar icon after HWND settles"""
             time.sleep(0.5)
-            EnumWindowsProc = ctypes.WINFUNCTYPE(
-                ctypes.c_bool,
-                ctypes.wintypes.HWND,
-                ctypes.wintypes.LPARAM
-            )
-            found = [None]
-            def callback(hwnd, _):
-                buf = ctypes.create_unicode_buffer(256)
-                ctypes.windll.user32.GetWindowTextW(hwnd, buf, 256)
-                if "MCBW" in buf.value or "Messenger" in buf.value:
-                    found[0] = hwnd
-                    return False
-                return True
-            ctypes.windll.user32.EnumWindows(EnumWindowsProc(callback), 0)
-            if found[0]:
-                _set_taskbar_icon(found[0])
+            hwnd = _find_webview_hwnd()
+            if hwnd:
+                _set_taskbar_icon(hwnd)
         
         threading.Thread(target=attach_icon, daemon=True).start()
 

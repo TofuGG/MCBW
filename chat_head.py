@@ -35,7 +35,7 @@ SNAP_MARGIN   = 8
 TASKBAR_H     = 52
 POLL_INTERVAL = 2.0   # seconds between unread checks
 
-STORAGE_DIR = os.path.join(os.environ.get("APPDATA", "."), "ChatHeadMessenger")
+STORAGE_DIR = os.path.join(os.environ.get("APPDATA", "."), "MCBW")
 CONFIG_FILE = os.path.join(STORAGE_DIR, "config.json")
 
 _state = {
@@ -52,7 +52,7 @@ _state = {
     "notify_req": False,   # bubble thread should show popup
     "lift_bubble_req": False,  # signal bubble to re-assert topmost after chat shows
     "saved_bubble_y": -1,  # restored bubble Y position from config
-    "bubble_nudge_y": -1,  # signal to nudge bubble up if chat won't fit below
+    "bubble_move_req": -1,   # target Y to smoothly animate bubble to
 }
 _lock = threading.Lock()
 
@@ -376,7 +376,7 @@ class BubbleThread(threading.Thread):
         self._logo_img = None
         try:
             from PIL import Image, ImageTk
-            logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+            logo_path = _get_asset_path("logo.png")
             if os.path.exists(logo_path):
                 img = Image.open(logo_path).convert("RGBA")
                 icon_size = BUBBLE_SIZE - 16
@@ -483,16 +483,14 @@ class BubbleThread(threading.Thread):
         canvas.bind("<Leave>", lambda e: draw(BUBBLE_COLOR, self._unread))
 
         def _quit():
-            # Force close: request webview close, persist size, then kill process
             with _lock:
-                _state["close_req"] = True
                 w = _state.get("chat_w", CHAT_W)
                 h = _state.get("chat_h", CHAT_H)
             try:
                 save_config(w, h)
             except Exception:
                 pass
-            root.after(200, lambda: os._exit(0))
+            os._exit(0)
 
         # Right-click to quit
         canvas.bind("<ButtonPress-3>", lambda e: _quit())
@@ -500,6 +498,28 @@ class BubbleThread(threading.Thread):
         root.update_idletasks()
         hwnd = ctypes.windll.user32.GetParent(root.winfo_id()) or root.winfo_id()
         _set_toolwindow(hwnd)
+
+        def _smooth_move_bubble(target_y):
+            nonlocal y
+            steps = 8
+            dy = (target_y - y) / steps
+
+            def step(n):
+                nonlocal y
+                if n == 0:
+                    y = target_y
+                    root.geometry(f"+{x}+{y}")
+                    with _lock:
+                        _state["bubble_y"] = y
+                    schedule_bubble_save()
+                    return
+                y = int(y + dy)
+                root.geometry(f"+{x}+{y}")
+                with _lock:
+                    _state["bubble_y"] = y
+                root.after(14, lambda: step(n - 1))
+
+            step(steps)
 
         def poll_notify():
             if not self.canvas:  # not ready yet
@@ -511,18 +531,16 @@ class BubbleThread(threading.Thread):
                 sender  = _state["last_sender"]
                 preview = _state["last_preview"]
                 lift    = _state.get("lift_bubble_req", False)
-                nudge_y = _state.get("bubble_nudge_y", -1)
+                move_target = _state.get("bubble_move_req", -1)
                 if req:
                     _state["notify_req"] = False
                 if lift:
                     _state["lift_bubble_req"] = False
-                if nudge_y != -1:
-                    _state["bubble_nudge_y"] = -1
+                if move_target != -1:
+                    _state["bubble_move_req"] = -1
 
-            if nudge_y != -1:
-                nonlocal y
-                y = nudge_y
-                root.geometry(f"+{x}+{y}")
+            if move_target != -1:
+                _smooth_move_bubble(move_target)
 
             if lift:
                 root.lift()
@@ -724,10 +742,10 @@ def run_webview():
                         new_by2 = sh2 - TASKBAR_H - current_h - BUBBLE_SIZE - 8
                         new_by2 = max(0, new_by2)
                         cy2 = new_by2 + BUBBLE_SIZE + 8
-                        # Signal bubble thread to move up
+                        # Signal bubble thread to move up smoothly
                         with _lock:
                             _state["bubble_y"] = new_by2
-                            _state["bubble_nudge_y"] = new_by2
+                            _state["bubble_move_req"] = new_by2
                     
                     cy2 = max(0, cy2)
                     

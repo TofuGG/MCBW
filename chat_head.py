@@ -19,8 +19,8 @@ import webview
 BUBBLE_SIZE   = 58
 BUBBLE_COLOR  = "#0084FF"
 BUBBLE_HOVER  = "#005FBF"
-CHAT_W        = 430  # Default starting width
-CHAT_H        = 700  # Default starting height
+CHAT_W        = 400  # Default starting width
+CHAT_H        = 780  # Default starting height
 SNAP_MARGIN   = 8
 TASKBAR_H     = 52
 POLL_INTERVAL = 2.0   # seconds between unread checks
@@ -40,6 +40,9 @@ _state = {
     "last_sender": "",
     "last_preview": "",
     "notify_req": False,   # bubble thread should show popup
+    "lift_bubble_req": False,  # signal bubble to re-assert topmost after chat shows
+    "saved_bubble_y": -1,  # restored bubble Y position from config
+    "bubble_nudge_y": -1,  # signal to nudge bubble up if chat won't fit below
 }
 _lock = threading.Lock()
 
@@ -56,6 +59,44 @@ def _set_toolwindow(hwnd):
     except Exception:
         pass
 
+def _set_taskbar_icon(hwnd):
+    """Set taskbar icon from logo.png using Windows API"""
+    try:
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+        if not os.path.exists(icon_path):
+            return
+
+        # Convert PNG to ICO in memory using Pillow
+        from PIL import Image
+        import io
+        img = Image.open(icon_path).convert("RGBA")
+
+        # Create both 16x16 and 32x32 sizes for proper taskbar rendering
+        ico_buf = io.BytesIO()
+        img.save(ico_buf, format="ICO", sizes=[(16, 16), (32, 32), (48, 48)])
+        ico_buf.seek(0)
+
+        # Write temp ICO file (LoadImage requires a file path)
+        ico_path = os.path.join(STORAGE_DIR, "taskbar_icon.ico")
+        os.makedirs(STORAGE_DIR, exist_ok=True)
+        with open(ico_path, "wb") as f:
+            f.write(ico_buf.read())
+
+        IMAGE_ICON   = 1
+        LR_LOADFROMFILE = 0x00000010
+        ICON_SMALL   = 0
+        ICON_BIG     = 1
+        WM_SETICON   = 0x0080
+
+        hicon = ctypes.windll.user32.LoadImageW(
+            None, ico_path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE
+        )
+        if hicon:
+            ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon)
+            ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG,   hicon)
+    except Exception:
+        pass
+
 # ── Config helpers ─────────────────────────────────────────────────────────────
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -67,6 +108,9 @@ def load_config():
                         # Prevent setting absurdly small sizes from bugged hidden states
                         _state["chat_w"] = max(300, data["width"])
                         _state["chat_h"] = max(400, data["height"])
+                if "bubble_y" in data:
+                    with _lock:
+                        _state["saved_bubble_y"] = data["bubble_y"]
         except Exception:
             pass
 
@@ -75,8 +119,10 @@ def save_config(w, h):
     if w > 100 and h > 100:
         try:
             os.makedirs(STORAGE_DIR, exist_ok=True)
+            with _lock:
+                by = _state["bubble_y"]
             with open(CONFIG_FILE, "w") as f:
-                json.dump({"width": w, "height": h}, f)
+                json.dump({"width": w, "height": h, "bubble_y": by}, f)
         except Exception:
             pass
 
@@ -96,11 +142,8 @@ HIDE_SIDEBAR_CSS = """
 (function() {
     var style = document.createElement('style');
     style.textContent = `
-        /* Hide the left icon sidebar */
-        [role="navigation"],
-        [aria-label="Chats"],
-        div[style*="width: 52px"],
-        div[style*="width:52px"] {
+        /* Target only the narrow icon sidebar by its exact aria-label */
+        [aria-label="Inbox switcher"] {
             display: none !important;
         }
     `;
@@ -150,8 +193,12 @@ UNREAD_JS = """
 
 RESIZE_GRIP_JS = """
 (function() {
-    var grip = document.createElement('div');
-    grip.style.cssText = `
+    if (document.getElementById('__resize_grip_br__')) return;
+
+    // ── Bottom-right grip ──────────────────────────────────────────────────
+    var grBR = document.createElement('div');
+    grBR.id = '__resize_grip_br__';
+    grBR.style.cssText = `
         position: fixed;
         bottom: 0;
         right: 0;
@@ -161,10 +208,11 @@ RESIZE_GRIP_JS = """
         z-index: 999999;
         background: transparent;
     `;
-    grip.addEventListener('mousedown', function(e) {
+    grBR.addEventListener('mousedown', function(e) {
         e.preventDefault();
         var startX = e.screenX, startY = e.screenY;
-        var startW = window.innerWidth, startH = window.innerHeight;
+        var startW = document.documentElement.clientWidth;
+        var startH = document.documentElement.clientHeight;
         function onMove(e) {
             var w = Math.max(300, startW + (e.screenX - startX));
             var h = Math.max(400, startH + (e.screenY - startY));
@@ -177,7 +225,43 @@ RESIZE_GRIP_JS = """
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
     });
-    document.body.appendChild(grip);
+    document.body.appendChild(grBR);
+
+    // ── Bottom-left grip ───────────────────────────────────────────────────
+    var grBL = document.createElement('div');
+    grBL.id = '__resize_grip_bl__';
+    grBL.style.cssText = `
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        width: 16px;
+        height: 16px;
+        cursor: sw-resize;
+        z-index: 999999;
+        background: transparent;
+    `;
+    grBL.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+        var startX = e.screenX, startY = e.screenY;
+        var startW = document.documentElement.clientWidth;
+        var startH = document.documentElement.clientHeight;
+        var startWinX = window.screenX;
+        function onMove(e) {
+            var dx = e.screenX - startX;
+            var dy = e.screenY - startY;
+            var w = Math.max(300, startW - dx);
+            var h = Math.max(400, startH + dy);
+            var newX = startWinX + (startW - w);
+            window.pywebview.api.resize_and_move(w, h, newX);
+        }
+        function onUp() {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    });
+    document.body.appendChild(grBL);
 })();
 """
 
@@ -191,6 +275,12 @@ class Api:
         """Called by JS resize grip to trigger window resize"""
         if self._win:
             self._win.resize(int(w), int(h))
+    
+    def resize_and_move(self, w, h, x):
+        """Resize and reposition window (for left-side drag)"""
+        if self._win:
+            self._win.resize(int(w), int(h))
+            self._win.move(int(x), self._win.y)
 
 
 class BubbleThread(threading.Thread):
@@ -215,6 +305,12 @@ class BubbleThread(threading.Thread):
 
         x = sw - BUBBLE_SIZE - SNAP_MARGIN
         y = (sh - BUBBLE_SIZE) // 2
+        # Restore saved bubble Y position if available
+        with _lock:
+            saved_y = _state.get("saved_bubble_y", -1)
+        if saved_y != -1:
+            y = max(0, min(saved_y, sh - TASKBAR_H - BUBBLE_SIZE))
+        
         with _lock:
             _state["bubble_x"] = x
             _state["bubble_y"] = y
@@ -259,6 +355,17 @@ class BubbleThread(threading.Thread):
         self._draw = draw
         draw(BUBBLE_COLOR)
 
+        bubble_save_timer = [None]  # mutable container for debounced bubble save
+
+        def schedule_bubble_save():
+            if bubble_save_timer[0]:
+                bubble_save_timer[0].cancel()
+            with _lock:
+                w = _state["chat_w"]
+                h = _state["chat_h"]
+            bubble_save_timer[0] = threading.Timer(1.0, lambda: save_config(w, h))
+            bubble_save_timer[0].start()
+
         drag = {"sx": 0, "sy": 0, "moved": False}
 
         def on_press(e):
@@ -280,6 +387,7 @@ class BubbleThread(threading.Thread):
             with _lock:
                 _state["bubble_x"] = x
                 _state["bubble_y"] = y
+            schedule_bubble_save()
 
         def on_release(e):
             if drag["moved"]:
@@ -351,8 +459,23 @@ class BubbleThread(threading.Thread):
                 unread  = _state["unread"]
                 sender  = _state["last_sender"]
                 preview = _state["last_preview"]
+                lift    = _state.get("lift_bubble_req", False)
+                nudge_y = _state.get("bubble_nudge_y", -1)
                 if req:
                     _state["notify_req"] = False
+                if lift:
+                    _state["lift_bubble_req"] = False
+                if nudge_y != -1:
+                    _state["bubble_nudge_y"] = -1
+
+            if nudge_y != -1:
+                nonlocal y
+                y = nudge_y
+                root.geometry(f"+{x}+{y}")
+
+            if lift:
+                root.lift()
+                root.attributes("-topmost", True)
 
             if unread != self._unread:
                 self._unread = unread
@@ -467,7 +590,7 @@ def run_webview():
     api = Api()  # placeholder, set reference after window creation
 
     win = webview.create_window(
-        "",
+        "MCBW - Messenger",
         "https://www.messenger.com",
         x=-9999, y=-9999,
         width=chat_w, height=chat_h,
@@ -489,6 +612,28 @@ def run_webview():
         with _lock:
             _state["webview_ready"] = True
         threading.Thread(target=_poll_unread, args=(win,), daemon=True).start()
+        
+        def attach_icon():
+            """Attach taskbar icon after HWND settles"""
+            time.sleep(0.5)
+            EnumWindowsProc = ctypes.WINFUNCTYPE(
+                ctypes.c_bool,
+                ctypes.wintypes.HWND,
+                ctypes.wintypes.LPARAM
+            )
+            found = [None]
+            def callback(hwnd, _):
+                buf = ctypes.create_unicode_buffer(256)
+                ctypes.windll.user32.GetWindowTextW(hwnd, buf, 256)
+                if "MCBW" in buf.value or "Messenger" in buf.value:
+                    found[0] = hwnd
+                    return False
+                return True
+            ctypes.windll.user32.EnumWindows(EnumWindowsProc(callback), 0)
+            if found[0]:
+                _set_taskbar_icon(found[0])
+        
+        threading.Thread(target=attach_icon, daemon=True).start()
 
     def on_resized(width, height):
         nonlocal resize_timer  # cleaner than global
@@ -496,6 +641,7 @@ def run_webview():
         with _lock:
             _state["chat_w"] = width
             _state["chat_h"] = height
+            _state["lift_bubble_req"] = True  # re-lift bubble above resizing window
         # Debounce config saves to avoid disk hammering during drag resizes
         if resize_timer:
             resize_timer.cancel()
@@ -536,13 +682,22 @@ def run_webview():
                     # Calculate Y position: prefer below bubble, above if it won't fit
                     cy2 = by2 + BUBBLE_SIZE + 8
                     if cy2 + current_h > sh2 - TASKBAR_H:
-                        cy2 = by2 - current_h - 8  # open above bubble instead
+                        # Push bubble up so chat fits below it
+                        new_by2 = sh2 - TASKBAR_H - current_h - BUBBLE_SIZE - 8
+                        new_by2 = max(0, new_by2)
+                        cy2 = new_by2 + BUBBLE_SIZE + 8
+                        # Signal bubble thread to move up
+                        with _lock:
+                            _state["bubble_y"] = new_by2
+                            _state["bubble_nudge_y"] = new_by2
+                    
                     cy2 = max(0, cy2)
                     
                     win.move(cx2, cy2)
                     win.show()
                     with _lock:
                         _state["chat_open"] = True
+                        _state["lift_bubble_req"] = True
                 except Exception:
                     pass
 

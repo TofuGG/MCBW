@@ -1,5 +1,5 @@
 """
-Messenger Chat Head for Windows
+Messenger Chat Bubbles for Windows
 - Floating bubble with unread badge + message preview popup
 - Frameless pywebview window (hidden/shown, never destroyed)
 - Scrollbar hidden via injected CSS
@@ -934,7 +934,7 @@ def main():
                 break
         time.sleep(0.05)
 
-    print("Chat Head running — click the blue bubble!")
+    print("Chat Bubble running — click the blue bubble!")
     print("Close this terminal to quit.\n")
 
     run_webview()   

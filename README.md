@@ -1,6 +1,6 @@
-# MCBW — Messenger Chat Head for Windows
+# MCBW — Messenger Chat Bubbles for Windows
 
-A floating Messenger chat head for Windows — just like the mobile bubbles, but on your desktop.
+A floating Messenger chat bubble for Windows — just like the mobile bubbles, but on your desktop.
 
 ---
 

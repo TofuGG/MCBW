@@ -501,7 +501,6 @@ class BubbleThread(threading.Thread):
                 toggle()
 
         def snap():
-            nonlocal x
             target = SNAP_MARGIN if x < sw // 2 else sw - BUBBLE_SIZE - SNAP_MARGIN
             dx = (target - x) / 8
             def step(n):
@@ -559,7 +558,6 @@ class BubbleThread(threading.Thread):
         _set_toolwindow(hwnd)
 
         def _smooth_move_bubble(target_y):
-            nonlocal y
             steps = 8
             dy = (target_y - y) / steps
 
@@ -810,7 +808,7 @@ def run_webview():
                 except Exception:
                     pass
 
-            webview_obj.CoreWebView2.DownloadStarting += on_download_starting
+            win.webview.CoreWebView2.DownloadStarting += on_download_starting
         except Exception:
             pass
 

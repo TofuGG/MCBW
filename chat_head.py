@@ -12,8 +12,10 @@ import os
 import sys
 import ctypes
 import json
+import queue
 import tkinter as tk
 import atexit
+import logging
 import webview
 
 
@@ -38,6 +40,8 @@ POLL_INTERVAL = 2.0   # seconds between unread checks
 STORAGE_DIR = os.path.join(os.environ.get("APPDATA", "."), "MCBW")
 CONFIG_FILE = os.path.join(STORAGE_DIR, "config.json")
 
+logger = logging.getLogger("MCBW")
+
 _state = {
     "sw": 0, "sh": 0,
     "bubble_x": 0, "bubble_y": 0,
@@ -55,6 +59,8 @@ _state = {
     "bubble_move_req": -1,   # target Y to smoothly animate bubble to
 }
 _lock = threading.Lock()
+_webview_win = None  # module-level reference for clean shutdown
+_wv_queue = queue.Queue()  # pywebview actions dispatched from watcher to tkinter thread
 
 # ── Windows helpers ────────────────────────────────────────────────────────────
 GWL_EXSTYLE      = -20
@@ -195,39 +201,68 @@ HIDE_SIDEBAR_CSS = """
 })();
 """
 
+FORCE_SELECT_CSS = """
+(function() {
+    var style = document.createElement('style');
+    style.textContent = `
+        *, *::before, *::after {
+            -webkit-user-select: text !important;
+            -moz-user-select: text !important;
+            -ms-user-select: text !important;
+            user-select: text !important;
+        }
+    `;
+    document.head.appendChild(style);
+})();
+"""
+
 UNREAD_JS = """
 (function() {
     var result = { unread: 0, sender: '', preview: '' };
     try {
-        var badges = document.querySelectorAll('[aria-label*="unread"]');
-        if (badges.length > 0) {
-            result.unread = badges.length;
-        } else {
-            var nums = document.querySelectorAll('span[aria-label]');
-            var count = 0;
-            nums.forEach(function(el) {
-                var lbl = el.getAttribute('aria-label') || '';
-                if (/^\\d+$/.test(lbl.trim())) count += parseInt(lbl.trim());
-            });
-            if (count > 0) result.unread = count;
-        }
+        var rows = document.querySelectorAll('[role="row"]');
+        var unreadRows = [];
+        rows.forEach(function(row) {
+            var text = row.textContent || '';
+            if (text.indexOf('Unread message:') !== -1) {
+                unreadRows.push(row);
+            }
+        });
 
-        var rows = document.querySelectorAll('a[href*="/t/"]');
-        for (var i = 0; i < rows.length; i++) {
-            var row = rows[i];
-            var bold = row.querySelector('span[style*="700"], span[style*="bold"]');
-            if (bold) {
-                var spans = row.querySelectorAll('span');
-                var texts = [];
-                spans.forEach(function(s) {
-                    if (s.children.length === 0 && s.textContent.trim())
-                        texts.push(s.textContent.trim());
-                });
-                if (texts.length >= 2) {
-                    result.sender  = texts[0];
-                    result.preview = texts.slice(1).join(' ').substring(0, 60);
+        result.unread = unreadRows.length;
+
+        if (unreadRows.length > 0) {
+            var first = unreadRows[0];
+
+            var moreBtn = first.querySelector('[aria-label^="More options for"]');
+            if (moreBtn) {
+                var lbl = moreBtn.getAttribute('aria-label') || '';
+                var m = lbl.match(/More options for (.+)/);
+                if (m) result.sender = m[1].trim();
+            }
+
+            if (!result.sender) {
+                var autoSpans = first.querySelectorAll('span[dir="auto"]');
+                for (var i = 0; i < autoSpans.length; i++) {
+                    var t = autoSpans[i].textContent.trim();
+                    if (t && t.indexOf('Unread message:') === -1 &&
+                        t.indexOf('·') === -1 && t.length > 1) {
+                        result.sender = t;
+                        break;
+                    }
                 }
-                break;
+            }
+
+            var allSpans = first.querySelectorAll('span');
+            for (var i = 0; i < allSpans.length; i++) {
+                var st = allSpans[i].textContent || '';
+                if (st.indexOf('Unread message:') !== -1) {
+                    var msg = st.replace('Unread message:', '').trim();
+                    if (msg) {
+                        result.preview = msg.substring(0, 80);
+                        break;
+                    }
+                }
             }
         }
     } catch(e) {}
@@ -309,6 +344,7 @@ RESIZE_GRIP_JS = """
 })();
 """
 
+
 # ── Bubble thread ──────────────────────────────────────────────────────────────
 class Api:
     """Expose Python methods to JS via window.pywebview.api"""
@@ -325,6 +361,7 @@ class Api:
         if self._win:
             self._win.resize(int(w), int(h))
             self._win.move(int(x), self._win.y)
+
 
 
 class BubbleThread(threading.Thread):
@@ -416,26 +453,38 @@ class BubbleThread(threading.Thread):
         def schedule_bubble_save():
             if bubble_save_timer[0]:
                 bubble_save_timer[0].cancel()
-            with _lock:
-                w = _state["chat_w"]
-                h = _state["chat_h"]
-            bubble_save_timer[0] = threading.Timer(1.0, lambda: save_config(w, h))
-            bubble_save_timer[0].start()
+            def _do_save():
+                with _lock:
+                    w = _state["chat_w"]
+                    h = _state["chat_h"]
+                save_config(w, h)
+            t = threading.Timer(1.0, _do_save)
+            t.daemon = True
+            bubble_save_timer[0] = t
+            t.start()
 
-        drag = {"sx": 0, "sy": 0, "moved": False}
+        DRAG_THRESHOLD = 5  # pixels before a click becomes a drag
+
+        drag = {"sx": 0, "sy": 0, "moved": False, "press_x": 0, "press_y": 0}
 
         def on_press(e):
             drag["sx"] = e.x_root - x
             drag["sy"] = e.y_root - y
             drag["moved"] = False
+            drag["press_x"] = e.x_root
+            drag["press_y"] = e.y_root
 
         def on_motion(e):
             nonlocal x, y
             if not drag["moved"]:
+                dx = abs(e.x_root - drag["press_x"])
+                dy = abs(e.y_root - drag["press_y"])
+                if dx < DRAG_THRESHOLD and dy < DRAG_THRESHOLD:
+                    return
+                drag["moved"] = True
                 with _lock:
                     if _state["chat_open"]:
                         _state["close_req"] = True
-            drag["moved"] = True
             x = e.x_root - drag["sx"]
             y = e.y_root - drag["sy"]
             y = max(0, min(y, sh - TASKBAR_H - BUBBLE_SIZE))
@@ -495,6 +544,11 @@ class BubbleThread(threading.Thread):
                 save_config(w, h)
             except Exception:
                 pass
+            try:
+                if _webview_win:
+                    _webview_win.destroy()
+            except Exception:
+                pass
             os._exit(0)
 
         # Right-click to quit
@@ -530,6 +584,22 @@ class BubbleThread(threading.Thread):
             if not self.canvas:  # not ready yet
                 root.after(500, poll_notify)
                 return
+
+            # Drain pywebview action queue — all win.show/hide/move calls go through here
+            while not _wv_queue.empty():
+                try:
+                    action = _wv_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    if action[0] == "show":
+                        _webview_win.move(action[1], action[2])
+                        _webview_win.show()
+                    elif action[0] == "hide":
+                        _webview_win.hide()
+                except Exception:
+                    pass
+
             with _lock:
                 req     = _state.get("notify_req", False)
                 unread  = _state["unread"]
@@ -615,6 +685,7 @@ def _on_loaded(window):
     try:
         window.evaluate_js(HIDE_SCROLLBAR_CSS)
         window.evaluate_js(HIDE_SIDEBAR_CSS)
+        window.evaluate_js(FORCE_SELECT_CSS)
     except Exception:
         pass
 
@@ -646,15 +717,50 @@ def _poll_unread(window):
                             _state["notify_req"] = True
                 first_poll = False
                 prev_unread = unread
+        except Exception as e:
+            logger.debug("unread poll error: %s", e)
+
+
+def download_complete_toast(filename):
+    """Brief toast notification for completed downloads"""
+    import tkinter as tk
+
+    toast = tk.Tk()
+    toast.overrideredirect(True)
+    toast.attributes("-topmost", True)
+    toast.configure(bg="#2a2a2a")
+
+    lbl = tk.Label(
+        toast,
+        text=f"Downloaded: {filename}",
+        bg="#2a2a2a",
+        fg="#ddd",
+        font=("Segoe UI", 11),
+        padx=14,
+        pady=8,
+    )
+    lbl.pack()
+
+    toast.update_idletasks()
+    sw = toast.winfo_screenwidth()
+    sh = toast.winfo_screenheight()
+    w = toast.winfo_width()
+    h = toast.winfo_height()
+    toast.geometry(f"+{sw - w - 16}+{sh - h - 48}")
+
+    def close():
+        try:
+            toast.destroy()
         except Exception:
             pass
+
+    toast.after(3000, close)
+    toast.mainloop()
 
 
 def run_webview():
     # Force Edge WebView2 to use our AppData folder for user data (cookies/session)
     os.environ["WEBVIEW2_USER_DATA_FOLDER"] = STORAGE_DIR
-
-    load_config() # Load saved dimensions before creating window
 
     with _lock:
         chat_w = _state["chat_w"]
@@ -678,23 +784,50 @@ def run_webview():
     )
     
     api._win = win  # set window reference after creation
+    global _webview_win
+    _webview_win = win
+
+    _poll_started = [False]  # mutable container for closure
 
     def on_loaded():
         _on_loaded(win)
-        win.evaluate_js(HIDE_SIDEBAR_CSS)
         win.evaluate_js(RESIZE_GRIP_JS)  # inject resize grip for frameless window
+
+        # Redirect downloads to ~/Downloads and show toast notification
+        try:
+            download_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+            os.makedirs(download_dir, exist_ok=True)
+
+            def on_download_starting(sender, args):
+                try:
+                    filename = os.path.basename(args.ResultFilePath)
+                    args.ResultFilePath = os.path.join(download_dir, filename)
+                    threading.Thread(
+                        target=download_complete_toast,
+                        args=(filename,),
+                        daemon=True,
+                    ).start()
+                except Exception:
+                    pass
+
+            webview_obj.CoreWebView2.DownloadStarting += on_download_starting
+        except Exception:
+            pass
+
         with _lock:
             _state["webview_ready"] = True
-        threading.Thread(target=_poll_unread, args=(win,), daemon=True).start()
-        
-        def attach_icon():
-            """Attach taskbar icon after HWND settles"""
-            time.sleep(0.5)
-            hwnd = _find_webview_hwnd()
-            if hwnd:
-                _set_taskbar_icon(hwnd)
-        
-        threading.Thread(target=attach_icon, daemon=True).start()
+        if not _poll_started[0]:
+            _poll_started[0] = True
+            threading.Thread(target=_poll_unread, args=(win,), daemon=True).start()
+
+            def attach_icon():
+                """Attach taskbar icon after HWND settles"""
+                time.sleep(0.5)
+                hwnd = _find_webview_hwnd()
+                if hwnd:
+                    _set_taskbar_icon(hwnd)
+
+            threading.Thread(target=attach_icon, daemon=True).start()
 
     def on_resized(width, height):
         nonlocal resize_timer  # cleaner than global
@@ -707,6 +840,7 @@ def run_webview():
         if resize_timer:
             resize_timer.cancel()
         resize_timer = threading.Timer(1.0, lambda: save_config(width, height))
+        resize_timer.daemon = True
         resize_timer.start()
 
     win.events.loaded += on_loaded
@@ -754,8 +888,7 @@ def run_webview():
                     
                     cy2 = max(0, cy2)
                     
-                    win.move(cx2, cy2)
-                    win.show()
+                    _wv_queue.put(("show", cx2, cy2))
                     with _lock:
                         _state["chat_open"] = True
                         _state["lift_bubble_req"] = True
@@ -764,7 +897,7 @@ def run_webview():
 
             if close_req:
                 try:
-                    win.hide()
+                    _wv_queue.put(("hide",))
                     with _lock:
                         _state["chat_open"] = False
                 except Exception:
@@ -772,8 +905,13 @@ def run_webview():
 
     threading.Thread(target=watcher, daemon=True).start()
 
-    atexit.register(lambda: save_config(_state["chat_w"], _state["chat_h"]))
+    def _save_on_exit():
+        with _lock:
+            w, h = _state["chat_w"], _state["chat_h"]
+        save_config(w, h)
+    atexit.register(_save_on_exit)
 
+    webview.settings['ALLOW_DOWNLOADS'] = True
     webview.start(
         storage_path=STORAGE_DIR,
         private_mode=False,
@@ -786,6 +924,8 @@ def main():
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
         pass
+
+    load_config()  # Load saved config before BubbleThread reads it
 
     bubble = BubbleThread()
     bubble.start()

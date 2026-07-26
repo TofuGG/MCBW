@@ -71,7 +71,7 @@ The finished executable will be in the `dist/` folder as `MCBW-Messenger.exe`.
 | 💬 Chat panel | Frameless Messenger (messenger.com) window embedded via pywebview |
 | 🔔 Unread badge | Red badge on the bubble shows unread message count |
 | 📩 Message preview | Popup notification shows sender name and message preview |
-| 🔐 Stay logged in | Session and cookies saved in `%APPDATA%\ChatHeadMessenger` |
+| 🔐 Stay logged in | Session and cookies saved in `%APPDATA%\MCBW` |
 | 💾 Persistent size | Chat window size is remembered across restarts |
 | 📍 Persistent position | Bubble position is remembered across restarts |
 | 🖱️ Resizable window | Drag the bottom-right or bottom-left corner to resize the chat panel |
@@ -110,7 +110,7 @@ The finished executable will be in the `dist/` folder as `MCBW-Messenger.exe`.
 ├── requirements.txt   ← dependencies
 └── README.md          ← this file
 
-📁 %APPDATA%\ChatHeadMessenger\   ← created automatically on first run
+📁 %APPDATA%\MCBW\   ← created automatically on first run
 ├── config.json                    ← saved window size and bubble position
 └── taskbar_icon.ico               ← generated from logo.png on first run
 ```

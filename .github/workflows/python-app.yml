@@ -58,10 +58,14 @@ jobs:
         if (Test-Path requirements.txt) { pip install -r requirements.txt }
     - name: Build exe
       run: pyinstaller --noconfirm --onefile --windowed --icon=logo.png --add-data "logo.png;." --name "MCBW-Messenger" chat_head.py
+    - name: Get first line of commit message
+      id: commit_msg
+      shell: bash
+      run: echo "msg=$(echo "${{ github.event.head_commit.message }}" | head -n 1)" >> $GITHUB_OUTPUT
     - name: Create release
       uses: softprops/action-gh-release@v2
       with:
         tag_name: build-${{ github.run_number }}
-        name: ${{ github.event.head_commit.message }}
+        name: ${{ steps.commit_msg.outputs.msg }}
         files: dist/MCBW-Messenger.exe
         generate_release_notes: true

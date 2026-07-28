@@ -71,6 +71,13 @@ The finished executable will be in the `dist/` folder as `MCBW-Messenger.exe`.
 | 💬 Chat panel | Frameless Messenger (messenger.com) window embedded via pywebview |
 | 🔔 Unread badge | Red badge on the bubble shows unread message count |
 | 📩 Message preview | Popup notification shows sender name and message preview |
+| 🔄 In-place update | Consecutive messages from the same person update the notification in-place |
+| 📝 Message grouping | Rapid messages from the same sender are grouped ("3 new messages") |
+| 🖱️ Click-to-open | Click the notification popup to instantly open the chat |
+| 👁️ Hover preview | Hover over the bubble for 1 second to re-show the last notification |
+| ✨ Fade-out dismiss | Notifications fade out smoothly instead of disappearing instantly |
+| 🖥️ System tray icon | Messenger icon in the system tray with right-click menu (Open / Quit) |
+| ⏱️ Configurable popup | Notification duration is configurable in settings (2–15 seconds) |
 | 🔐 Stay logged in | Session and cookies saved in `%APPDATA%\MCBW` |
 | 💾 Persistent size | Chat window size is remembered across restarts |
 | 📍 Persistent position | Bubble position is remembered across restarts |
@@ -83,7 +90,7 @@ The finished executable will be in the `dist/` folder as `MCBW-Messenger.exe`.
 
 ## How to Use
 
-1. **Launch** — run `chat_head.py` or `MCBW-Messenger.exe`. A blue bubble appears on the right side of your screen.
+1. **Launch** — run `chat_head.py` or `MCBW-Messenger.exe`. A blue bubble appears on the right side of your screen, and a Messenger icon appears in the system tray.
 
 2. **Drag** — click and drag the bubble anywhere on screen. It snaps to the nearest edge (left or right) when released.
 
@@ -93,11 +100,15 @@ The finished executable will be in the `dist/` folder as `MCBW-Messenger.exe`.
 
 5. **Resize** — drag the bottom-right or bottom-left corner of the chat panel to resize it. The new size is saved automatically.
 
-6. **Notifications** — when the chat panel is closed and a new message arrives, a small popup appears next to the bubble showing the sender and a message preview. (Might not work)
+6. **Notifications** — when the chat panel is closed and a new message arrives, a rounded popup appears next to the bubble showing the sender and a message preview. Consecutive messages from the same person update the notification in-place. Rapid messages are grouped ("3 new messages"). Click the popup to open the chat directly.
 
-7. **Unread count** — the red badge on the bubble shows how many unread messages you have.
+7. **Hover preview** — hover over the bubble for 1 second to re-show the last notification message.
 
-8. **Quit** — right-click the bubble to fully close the app and save your settings.
+8. **Unread count** — the red badge on the bubble shows how many unread messages you have.
+
+9. **System tray** — right-click the tray icon to open the chat or quit the app. Double-click the tray icon to toggle the chat.
+
+10. **Quit** — right-click the bubble or use the system tray icon to fully close the app and save your settings.
 
 ---
 
@@ -106,13 +117,14 @@ The finished executable will be in the `dist/` folder as `MCBW-Messenger.exe`.
 ```
 📁 project folder
 ├── chat_head.py       ← main script
-├── logo.png           ← bubble and taskbar icon
+├── logo.png           ← bubble, taskbar, and tray icon
 ├── requirements.txt   ← dependencies
+├── MCBW-Messenger.spec ← PyInstaller build config
 └── README.md          ← this file
 
-📁 %APPDATA%\MCBW\   ← created automatically on first run
-├── config.json                    ← saved window size and bubble position
-└── taskbar_icon.ico               ← generated from logo.png on first run
+📁 %APPDATA%\MCBW\     ← created automatically on first run
+├── config.json        ← saved window size, bubble position, and popup duration
+└── taskbar_icon.ico   ← generated from logo.png on first run
 ```
 
 ---
@@ -122,6 +134,9 @@ The finished executable will be in the `dist/` folder as `MCBW-Messenger.exe`.
 - The chat panel auto-adjusts its spawn position if the bubble is too low on screen — it nudges the bubble up to make room.
 - The panel always opens below the bubble when possible, and above it if there isn't enough space.
 - The bubble always stays on top of the chat panel.
+- Notifications group messages from the same sender within 10 seconds into a single popup.
+- Popup duration can be configured in `%APPDATA%\MCBW\config.json` (default: 5 seconds, range: 2–15 seconds).
+- Supports multiple monitors — the bubble and chat panel respect the full virtual screen bounds.
 - If the Messenger UI changes (Meta updates their web app), the sidebar hiding or unread detection may need a selector update in the script.
 
 ---
